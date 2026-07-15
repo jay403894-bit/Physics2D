@@ -143,6 +143,7 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="include\TileMap.h" />
     <ClInclude Include="include\Vec2.h" />
     <ClInclude Include="include\CollisionLayer.h" />
     <ClInclude Include="include\EntityTable.h" />

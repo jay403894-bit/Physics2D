@@ -5,6 +5,7 @@
 #include "PhysicsWorld.h"
 #include "SpatialGrid.h"
 #include "PhysicsSystem.h"
+#include "TileMap.h"
 #include <TaskScheduler.h>
 
 using namespace Physics2D;
@@ -449,6 +450,63 @@ static void TestResolveParticleSIMDPath() {
     assert(applied == 7.0f);
 }
 
+// Stage-4 sensor migration parity: the four directional sensors must return the SAME row
+// whether they search via the SpatialGrid (tiles=nullptr) or via the TileMap fast path
+// (cell lookup -> rowHandle -> resolve). Covers: handles surviving the commit sort, a
+// destroyed tile going silent on both paths, and off-map probes reading empty.
+static void TestTileMapSensorParity() {
+    using PS = PhysicsSystem;
+    PhysicsWorld world(64, 8, 8, 8);
+    SpatialGrid grid(1024, 1024, 64, 64);
+    TileMap tiles;
+    tiles.Init(20, 10, 16.0f);
+
+    // 16px solid tiles boxing the actor: below/left/right/above, one per probe.
+    auto placeTile = [&](int cx, int cy) {
+        float x = cx * 16.0f + 8.0f, y = cy * 16.0f + 8.0f;
+        int idx = world.spawn(ShapeType::RECT, Vec2{ 16, 16 }, x, y, 0, 0, 1.0f,
+                              0.0f, LAYER_PLAYER, LAYER_PLAYER, false, false, false);
+        assert(idx != -1);
+        world.isTile[idx] = 1;
+        tiles.behavior[(size_t)cy * tiles.width + cx] = TileBehavior::Solid;
+        tiles.rowHandles[(size_t)cy * tiles.width + cx] = world.handleOf(idx);
+        return world.handleOf(idx);
+    };
+    Handle hBelow = placeTile(6, 7);
+    placeTile(5, 6); placeTile(7, 6); placeTile(6, 5);
+
+    int actorIdx = world.spawn(ShapeType::RECT, Vec2{ 16, 16 }, 104.0f, 100.0f, 0, 0, 1.0f,
+                               0.0f, LAYER_PLAYER, LAYER_PLAYER, true, false, false);
+    Handle hActor = world.handleOf(actorIdx);
+
+    world.commit(&grid); // sorts every row -- rowHandles must still resolve correctly
+    int a = world.resolve(hActor);
+    assert(a != -1);
+
+    int belowG = PS::TileBelowSensor(a, world, grid);
+    int belowT = PS::TileBelowSensor(a, world, grid, &tiles);
+    int leftG  = PS::LeftTileSensor(a, world, grid);
+    int leftT  = PS::LeftTileSensor(a, world, grid, &tiles);
+    int rightG = PS::RightTileSensor(a, world, grid);
+    int rightT = PS::RightTileSensor(a, world, grid, &tiles);
+    int aboveG = PS::TileAboveSensor(a, world, grid);
+    int aboveT = PS::TileAboveSensor(a, world, grid, &tiles);
+    assert(belowG != -1 && belowG == belowT);
+    assert(leftG  != -1 && leftG  == leftT);
+    assert(rightG != -1 && rightG == rightT);
+    assert(aboveG != -1 && aboveG == aboveT);
+
+    // Destroy the floor tile: after the commit reclaims it, BOTH paths must go silent
+    // (grid: row gone from runs; tilemap: stale handle resolves -1 and is skipped).
+    world.life[world.resolve(hBelow)] = -1.0f;
+    world.commit(&grid);
+    a = world.resolve(hActor);
+    assert(PS::TileBelowSensor(a, world, grid) == -1);
+    assert(PS::TileBelowSensor(a, world, grid, &tiles) == -1);
+
+    printf("[TestTileMapSensorParity] OK -- 4 sensors agree grid vs tilemap, incl. post-sort and post-destroy\n");
+}
+
 int main() {
     TestLanding();
     TestSlotReuse();
@@ -459,6 +517,7 @@ int main() {
     TestCellSortHandles();
     TestChunkIntegrationSIMD();
     TestResolveParticleSIMDPath();
+    TestTileMapSensorParity();
     TestParallelDispatch();
     TestDeferredSpawnCommit();
     printf("ALL SMOKE TESTS PASSED\n");

@@ -4,6 +4,7 @@
 #include "../include/EntityTable.h"
 #include "../include/PlatformTable.h"
 #include "../include/PhysicsTuning.h"
+#include "../include/TileMap.h"
 #include <TaskScheduler.h>
 #include <algorithm>
 #include <cmath>
@@ -23,6 +24,40 @@ constexpr float kPi = std::numbers::pi_v<float>;
 bool IsPlayerOnPlatform(float playerX, float centerX) {
     // 80.0f + 2.0f buffer to prevent edge-snapping jitter
     return std::abs(playerX - centerX) <= (80.0f + 2.0f);
+}
+
+// The TileMap fast path shared by all four directional sensors: which cells does the
+// probe rect touch (usually 1-2), does the map say a tile lives there, and if so resolve
+// its row and apply the EXACT same guards + AABB test the grid path applies -- so the
+// two paths return the same rows for the same world. CellX/CellY are unclamped, so a
+// probe hanging off the map edge just iterates cells whose BehaviorAtCell says None.
+int ProbeTileMapRows(const Physics2D::PhysicsWorld& world, const Physics2D::TileMap& tiles,
+                     float sensorX, float sensorY, float sensorHW, float sensorHH) {
+    using namespace Physics2D;
+    float sMinX = sensorX - sensorHW, sMaxX = sensorX + sensorHW;
+    float sMinY = sensorY - sensorHH, sMaxY = sensorY + sensorHH;
+    int cx0 = tiles.CellX(sMinX), cx1 = tiles.CellX(sMaxX);
+    int cy0 = tiles.CellY(sMinY), cy1 = tiles.CellY(sMaxY);
+
+    for (int cy = cy0; cy <= cy1; ++cy) {
+        for (int cx = cx0; cx <= cx1; ++cx) {
+            if (tiles.BehaviorAtCell(cx, cy) == TileBehavior::None) continue; // also covers out-of-bounds
+            int row = world.resolve(tiles.rowHandles[(size_t)cy * tiles.width + cx]);
+            if (row < 0) continue; // tile row destroyed (e.g. destructible) -- map not yet cleared
+
+            if (!world.isTile[row] || world.layer[row] == 0 || world.life[row] <= 0.0f) continue;
+
+            float tMinX = world.posX[row] - (world.size[row].x * 0.5f);
+            float tMaxX = world.posX[row] + (world.size[row].x * 0.5f);
+            float tMinY = world.posY[row] - (world.size[row].y * 0.5f);
+            float tMaxY = world.posY[row] + (world.size[row].y * 0.5f);
+
+            if (sMaxX > tMinX && sMinX < tMaxX && sMaxY > tMinY && sMinY < tMaxY) {
+                return row;
+            }
+        }
+    }
+    return -1;
 }
 
 float GetSlopeSurfaceY(int slopeID, float playerX, const PhysicsWorld& world) {
@@ -57,7 +92,7 @@ bool IsStandingOnSlope(int i, int slopeID, const PhysicsWorld& world) {
 }
 } // namespace
 
-int PhysicsSystem::TileAboveSensor(int entityIdx, const PhysicsWorld& world, SpatialGrid& grid) {
+int PhysicsSystem::TileAboveSensor(int entityIdx, const PhysicsWorld& world, SpatialGrid& grid, const TileMap* tiles) {
     float hw = world.size[entityIdx].x * 0.5f;
     float hh = world.size[entityIdx].y * 0.5f;
 
@@ -66,6 +101,9 @@ int PhysicsSystem::TileAboveSensor(int entityIdx, const PhysicsWorld& world, Spa
     float sensorHW = Tuning::kSensorProbeHalfWidth;
     float sensorHH = hh * Tuning::kSensorShrink;
 
+    if (tiles && !tiles->rowHandles.empty())
+        return ProbeTileMapRows(world, *tiles, sensorX, sensorY, sensorHW, sensorHH);
+
     // Callback iteration -- no neighbor list, no per-call heap allocation. Returns
     // false from the lambda on the first hit to stop the scan (bool protocol).
     int hit = -1;
@@ -92,7 +130,7 @@ int PhysicsSystem::TileAboveSensor(int entityIdx, const PhysicsWorld& world, Spa
     return hit;
 }
 
-int PhysicsSystem::LeftTileSensor(int entityIdx, const PhysicsWorld& world, SpatialGrid& grid) {
+int PhysicsSystem::LeftTileSensor(int entityIdx, const PhysicsWorld& world, SpatialGrid& grid, const TileMap* tiles) {
     float hw = world.size[entityIdx].x * 0.5f;
     float hh = world.size[entityIdx].y * 0.5f;
 
@@ -101,6 +139,9 @@ int PhysicsSystem::LeftTileSensor(int entityIdx, const PhysicsWorld& world, Spat
     float sensorHW = Tuning::kSensorProbeHalfWidth;
     float sensorHH = hh * Tuning::kSensorShrink;
 
+    if (tiles && !tiles->rowHandles.empty())
+        return ProbeTileMapRows(world, *tiles, sensorX, sensorY, sensorHW, sensorHH);
+
     // Callback iteration -- no neighbor list, no per-call heap allocation. Returns
     // false from the lambda on the first hit to stop the scan (bool protocol).
     int hit = -1;
@@ -127,7 +168,7 @@ int PhysicsSystem::LeftTileSensor(int entityIdx, const PhysicsWorld& world, Spat
     return hit;
 }
 
-int PhysicsSystem::RightTileSensor(int entityIdx, const PhysicsWorld& world, SpatialGrid& grid) {
+int PhysicsSystem::RightTileSensor(int entityIdx, const PhysicsWorld& world, SpatialGrid& grid, const TileMap* tiles) {
     float hw = world.size[entityIdx].x * 0.5f;
     float hh = world.size[entityIdx].y * 0.5f;
 
@@ -136,6 +177,9 @@ int PhysicsSystem::RightTileSensor(int entityIdx, const PhysicsWorld& world, Spa
     float sensorHW = Tuning::kSensorProbeHalfWidth;
     float sensorHH = hh * Tuning::kSensorShrink;
 
+    if (tiles && !tiles->rowHandles.empty())
+        return ProbeTileMapRows(world, *tiles, sensorX, sensorY, sensorHW, sensorHH);
+
     // Callback iteration -- no neighbor list, no per-call heap allocation. Returns
     // false from the lambda on the first hit to stop the scan (bool protocol).
     int hit = -1;
@@ -162,7 +206,7 @@ int PhysicsSystem::RightTileSensor(int entityIdx, const PhysicsWorld& world, Spa
     return hit;
 }
 
-int PhysicsSystem::TileBelowSensor(int entityIdx, const PhysicsWorld& world, SpatialGrid& grid) {
+int PhysicsSystem::TileBelowSensor(int entityIdx, const PhysicsWorld& world, SpatialGrid& grid, const TileMap* tiles) {
     float hw = world.size[entityIdx].x * 0.5f;
     float hh = world.size[entityIdx].y * 0.5f;
 
@@ -170,6 +214,9 @@ int PhysicsSystem::TileBelowSensor(int entityIdx, const PhysicsWorld& world, Spa
     float sensorY = world.posY[entityIdx] + hh + Tuning::kSensorProbeOffset;
     float sensorHW = Tuning::kSensorProbeHalfWidth;
     float sensorHH = hh * Tuning::kSensorShrink;
+
+    if (tiles && !tiles->rowHandles.empty())
+        return ProbeTileMapRows(world, *tiles, sensorX, sensorY, sensorHW, sensorHH);
 
     // Callback iteration -- no neighbor list, no per-call heap allocation. Returns
     // false from the lambda on the first hit to stop the scan (bool protocol).
@@ -406,8 +453,8 @@ void PhysicsSystem::WallSlideCheck(int i, PhysicsContext& ctx) {
     int slot = world.entitySlot[i];
     float intent = (slot != -1) ? ctx.entities.moveIntent[slot] : 0.0f;
 
-    int leftTile = LeftTileSensor(i, world, ctx.grid);
-    int rightTile = RightTileSensor(i, world, ctx.grid);
+    int leftTile = LeftTileSensor(i, world, ctx.grid, ctx.tiles);
+    int rightTile = RightTileSensor(i, world, ctx.grid, ctx.tiles);
     bool onWall = (leftTile >= 0 && world.velY[i] > 0.0f && intent < 0.0f && world.slopeType[leftTile] == SlopeType::NONE)
         || (rightTile >= 0 && world.velY[i] > 0.0f && intent > 0.0f && world.slopeType[rightTile] == SlopeType::NONE);
 
@@ -483,7 +530,7 @@ void PhysicsSystem::HandleSlopeSnap(int i, PhysicsContext& ctx, float dx) {
     int slot = world.entitySlot[i];
     bool jumping = (slot != -1) && ctx.entities.isJumping[slot];
 
-    int potentialSlope = (world.velX[i] > 0.0f) ? RightTileSensor(i, world, ctx.grid) : LeftTileSensor(i, world, ctx.grid);
+    int potentialSlope = (world.velX[i] > 0.0f) ? RightTileSensor(i, world, ctx.grid, ctx.tiles) : LeftTileSensor(i, world, ctx.grid, ctx.tiles);
     // Only snap up when approaching the slope's LOW side in its uphill direction -- same
     // direction check as GetHorizontalSensor. Without this, approaching from the tall/back
     // side (e.g. moving left into an UP_RIGHT slope) still snaps you onto the surface even
@@ -510,7 +557,7 @@ CollisionConstraint PhysicsSystem::CheckSlopeSnap(int i, PhysicsContext& ctx, fl
     int slot = world.entitySlot[i];
     bool jumping = (slot != -1) && ctx.entities.isJumping[slot];
 
-    int potentialSlope = (world.velX[i] > 0.0f) ? RightTileSensor(i, world, ctx.grid) : LeftTileSensor(i, world, ctx.grid);
+    int potentialSlope = (world.velX[i] > 0.0f) ? RightTileSensor(i, world, ctx.grid, ctx.tiles) : LeftTileSensor(i, world, ctx.grid, ctx.tiles);
 
     // Same uphill-direction check as HandleSlopeSnap/GetHorizontalSensor -- otherwise this
     // still snaps the entity onto the slope's surface even when approaching from its
@@ -665,7 +712,7 @@ CollisionConstraint PhysicsSystem::CheckGrounding(int i, PhysicsContext& ctx) {
 
 CollisionConstraint PhysicsSystem::CheckCeilingCollision(int i, PhysicsContext& ctx) {
     PhysicsWorld& world = ctx.world;
-    int ceilingID = TileAboveSensor(i, world, ctx.grid);
+    int ceilingID = TileAboveSensor(i, world, ctx.grid, ctx.tiles);
     CollisionConstraint result;
     if (ceilingID != -1 && world.velY[i] < 0.0f) {
         float ceilingY = world.posY[ceilingID] + (world.size[ceilingID].y * 0.5f);
@@ -755,7 +802,7 @@ void PhysicsSystem::ApplyPhysics(int i, PhysicsContext& ctx, float dt) {
         // deceleration -- using it directly as the decel rate would be imperceptible.
         bool activelyDriven = slot != -1 && ctx.entities.moveIntent[slot] != 0.0f;
         if (!activelyDriven) {
-            int floorID = TileBelowSensor(i, world, ctx.grid);
+            int floorID = TileBelowSensor(i, world, ctx.grid, ctx.tiles);
             if (floorID != -1) {
                 constexpr float kFrictionDecelScale = 2000.0f;
                 float decel = world.friction[floorID] * kFrictionDecelScale * dt;
@@ -866,6 +913,21 @@ void PhysicsSystem::ResolveParticle(int i, PhysicsContext& ctx) {
         }
 
         if (overlapX < overlapY) {
+            // At a slope-to-flat seam: if this entity is grounded on an adjacent slope,
+            // and this flat tile is the slope's horizontal neighbor at the same surface
+            // height, skip the collision -- the slope already owns the landing, and this
+            // would create a double-collision wall at the internal edge.
+            if (slot != -1 && ctx.entities.isGrounded[slot]) {
+                int currentFloor = FindFloorMultiTile(i, world, ctx.grid);
+                if (currentFloor != -1 && world.slopeType[currentFloor] != SlopeType::NONE) {
+                    float slopeY = world.posY[currentFloor] - world.size[currentFloor].y * 0.5f;
+                    float flatY = world.posY[otherID] - world.size[otherID].y * 0.5f;
+                    if (std::abs(slopeY - flatY) < 1.0f) { // same surface height (within 1px)
+                        return; // skip this internal edge
+                    }
+                }
+            }
+
             world.posX[i] += (dx > 0) ? overlapX : -overlapX;
 
             if ((dx < 0 && world.velX[i] > 0.0f) || (dx > 0 && world.velX[i] < 0.0f)) {
@@ -989,11 +1051,19 @@ void PhysicsSystem::SyncPrevPositions(PhysicsWorld& world) {
 // isGhosted meaning (from the old loop, still applies): ghosted must be fully inert on
 // BOTH sides of a collision check -- not just invisible to other rows' queries, but not
 // integrating or resolving as itself either, or its onCollision fires every frame forever.
+// Thin composition -- the two stages below, in order. Existing callers unchanged.
 void PhysicsSystem::UpdateChunk(int start, int end, float dt, PhysicsContext& ctx, bool gridMovement) {
+    IntegrateChunk(start, end, dt, ctx, gridMovement);
+    ResolveChunk(start, end, dt, ctx, gridMovement);
+    // Future: specialized behavior passes (sine-wave/boids/homing) run BEFORE IntegrateChunk,
+    // writing velX/velY for their tagged rows; the two shared stages then move+resolve them.
+}
+
+void PhysicsSystem::IntegrateChunk(int start, int end, float dt, PhysicsContext& ctx, bool gridMovement) {
     PhysicsWorld& world = ctx.world;
     if (end > (int)world.maxEntities) end = (int)world.maxEntities;
 
-    // ---- Pass A: masked SIMD integration ----
+    // ---- masked SIMD integration (gravity/velocity/position + rotation/spin-drag) ----
     const __m256  vdt    = _mm256_set1_ps(dt);
     const __m256  vdrag  = _mm256_set1_ps(0.99f); // "air resistance" so spin doesn't last forever
     const __m256  vzero  = _mm256_setzero_ps();
@@ -1075,8 +1145,13 @@ void PhysicsSystem::UpdateChunk(int start, int end, float dt, PhysicsContext& ct
             world.posY[i] += world.velY[i] * dt;
         }
     }
+}
 
-    // ---- Pass B: scalar -- life countdown, grid movement, age, collision resolve ----
+// ---- scalar per-row finalize: life countdown, grid movement, age, collision resolve ----
+void PhysicsSystem::ResolveChunk(int start, int end, float dt, PhysicsContext& ctx, bool gridMovement) {
+    PhysicsWorld& world = ctx.world;
+    if (end > (int)world.maxEntities) end = (int)world.maxEntities;
+
     for (int j = start; j < end; ++j) {
         if (world.life[j] <= 0.0f) continue;
         if (world.isGhosted[j]) continue;
