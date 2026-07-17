@@ -1162,17 +1162,6 @@ void PhysicsSystem::ResolveChunk(int start, int end, float dt, PhysicsContext& c
     for (int j = start; j < end; ++j) {
         if (world.life[j] <= 0.0f) continue;
         if (world.isGhosted[j]) continue;
-        // Immovable/kinematic rows NEVER self-resolve. ResolveParticle resolves by moving
-        // row i ITSELF out of an overlap -- correct for entities/particles, catastrophic for
-        // tiles: a kinematic platform intruding into a static tile made the TILE wall-resolve
-        // itself out of the platform's way (slopes shoved upward by a falling platform, solid
-        // tiles pushed along by a rising one -- and since Draw recovers a static tile's sprite
-        // by POSITION, the displaced row then rendered a different cell's sprite). Platforms
-        // (also isTile=1) are excluded for the same reason: UpdatePlatforms owns their motion.
-        // Entity-vs-tile interaction is unaffected -- the ENTITY side of every pair still
-        // resolves and still fires both sides' collision callbacks. Also a perf win: static
-        // tiles no longer run a neighbor query every substep.
-        if (world.isTile[j]) continue;
 
         int slot = world.entitySlot[j];
         bool isPlayerControlled = (slot != -1) && ctx.entities.isPlayerControlled[slot];
